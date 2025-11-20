@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         GGGMDLP - anti-déconnexion
+// @name         MDLP - anti-déconnexion
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Auto login + keep-alive sur la page Stitch Noël, avec panneau d’état et logs debug.
 // @match        https://www.maisondelapresse.com/mini-figurine-stitch-edition-noel.html
 // @run-at       document-end
