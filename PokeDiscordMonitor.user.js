@@ -7,6 +7,8 @@
 // @match        https://*.discord.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @updateURL   https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/PokeDiscordMonitor.user.js
+// @downloadURL https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/PokeDiscordMonitor.user.js
 // ==/UserScript==
 
 (function() {
