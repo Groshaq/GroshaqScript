@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         Micromania SKU Injector
+// @name         Micromania SKU Injector TEST
 // @namespace    http://tampermonkey.net/
 // @version      0.6
 // @description  Force l'ajout d'un produit Micromania via son PID
 // @match        https://www.micromania.fr/*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/Micromania%20SKU%20Injector.user.js
+// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/Micromania%20SKU%20Injector.user.js
 // ==/UserScript==
 
 (function () {
