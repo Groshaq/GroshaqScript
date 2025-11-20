@@ -6,6 +6,8 @@
 // @match        https://www.cultura.com/*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/Cultura%20SKU%20Injector.user.js
+// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/Cultura%20SKU%20Injector.user.js
 // ==/UserScript==
 
 (function () {
