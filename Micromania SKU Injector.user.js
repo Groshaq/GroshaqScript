@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Micromania SKU Injector TEST
+// @name         Micromania SKU Injector
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      1
 // @description  Force l'ajout d'un produit Micromania via son PID
 // @match        https://www.micromania.fr/*
 // @run-at       document-start
