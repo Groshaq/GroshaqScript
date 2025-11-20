@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         MDLP - Reload Queue fermée TEST
+// @name         MDLP - Reload Queue fermée
 // @namespace    Reload Queue fermée
-// @version      0.1
+// @version      1
 // @description  Si la page affiche "Cette file d'attente est maintenant fermée.", fait un F5 périodique. Sinon ne fait rien.
 // @match        https://maisondelapresse.queue-fair.net/*
 // @grant        none
