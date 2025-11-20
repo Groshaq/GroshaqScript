@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Cultura SKU Injector TEST
+// @name         Cultura SKU Injector
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      1
 // @description  Ajoute un produit Cultura via son SKU
 // @match        https://www.cultura.com/*
 // @run-at       document-start
