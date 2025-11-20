@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         MDLP - anti-déconnexion
+// @name         MDLP - anti-déconnexion TEST
 // @namespace    http://tampermonkey.net/
 // @version      0.4
 // @description  Auto login + keep-alive sur la page Stitch Noël, avec panneau d’état et logs debug.
 // @match        https://www.maisondelapresse.com/mini-figurine-stitch-edition-noel.html
 // @run-at       document-end
 // @grant        none
+// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20AntiDeco.user.js
+// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20AntiDeco.user.js
 // ==/UserScript==
 
 (function() {
