@@ -6,8 +6,8 @@
 // @match        https://www.maisondelapresse.com/mini-figurine-stitch-edition-noel.html
 // @run-at       document-end
 // @grant        none
-// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20AntiDeco.user.js
-// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20AntiDeco.user.js
+// @updateURL    https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20-%20AntiDeco.user.js
+// @downloadURL  https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20-%20AntiDeco.user.js
 // ==/UserScript==
 
 (function() {
