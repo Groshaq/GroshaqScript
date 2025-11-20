@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         PokeDiscordMonitor3
+// @name         PokeDiscordMonitor
 // @namespace    https://discord.com/
-// @version      1.4
+// @version      1.5
 // @description  Ouvre automatiquement les liens des messages Discord contenant tous les mots-clés d'un groupe, avec logs, groupes illimités et prise en compte immédiate des changements.
 // @match        https://discord.com/*
 // @match        https://*.discord.com/*
