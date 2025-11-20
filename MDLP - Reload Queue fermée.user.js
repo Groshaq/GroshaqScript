@@ -6,8 +6,8 @@
 // @match        https://maisondelapresse.queue-fair.net/*
 // @grant        none
 // @run-at       document-idle
-// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
-// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
+// @updateURL    https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
+// @downloadURL  https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
 // ==/UserScript==
 
 // Empeche l'onglet de se mettre en inactif
