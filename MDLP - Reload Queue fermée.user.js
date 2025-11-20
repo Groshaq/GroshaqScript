@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         MDLP - Reload Queue fermée
+// @name         MDLP - Reload Queue fermée TEST
 // @namespace    Reload Queue fermée
-// @version      1.0
+// @version      0.1
 // @description  Si la page affiche "Cette file d'attente est maintenant fermée.", fait un F5 périodique. Sinon ne fait rien.
 // @match        https://maisondelapresse.queue-fair.net/*
 // @grant        none
 // @run-at       document-idle
+// @updateURL    https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
+// @downloadURL  https://github.com/Groshaq/GroshaqScript/raw/refs/heads/main/MDLP%20-%20Reload%20Queue%20ferm%C3%A9e.user.js
 // ==/UserScript==
 
 // Empeche l'onglet de se mettre en inactif
