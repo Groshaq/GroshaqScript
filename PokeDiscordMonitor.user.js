@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         PokeDiscordMonitor
 // @namespace    https://discord.com/
-// @version      1.5
-// @description  Ouvre automatiquement les liens des messages Discord contenant tous les mots-clés d'un groupe, avec logs, groupes illimités et prise en compte immédiate des changements.
+// @version      2.0
+// @description  Ouvre automatiquement les liens des messages Discord contenant tous les mots-clés d'un groupe, avec logs, groupes illimités et détection ultra-rapide (MutationObserver global + scan périodique).
 // @match        https://discord.com/*
 // @match        https://*.discord.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_openInTab
+// @run-at       document-end
 // @updateURL    https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/PokeDiscordMonitor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/PokeDiscordMonitor.user.js
 // ==/UserScript==
@@ -24,7 +26,6 @@
     function defaultConfig() {
         return {
             channelNameFilter: 'alertes-pokemon',
-
             groups: [
                 {
                     id: 'g1',
@@ -187,8 +188,8 @@
         return score;
     }
 
-    function findBestLinkInMessage(li) {
-        const anchors = Array.from(li.querySelectorAll('a[href^="http"]'));
+    function findBestLinkInMessage(container) {
+        const anchors = Array.from(container.querySelectorAll('a[href^="http"]'));
         if (!anchors.length) return null;
 
         let best = null, bestScore = -Infinity;
@@ -202,49 +203,87 @@
         return bestScore >= -1000 ? best.href : null;
     }
 
-    // ---------- SALON ----------
-    function isOnTargetChannel() {
+    // ---------- CHANNEL CHECK ----------
+    function isInTargetChannelForElement(el) {
         const cfg = globalConfig || {};
-        const main = document.querySelector('main.chatContent_f75fb0[aria-label]');
-        if (!main) return true;
-        const label = normalize(main.getAttribute('aria-label'));
         const filter = normalize(cfg.channelNameFilter || '');
         if (!filter) return true;
+
+        // on cherche le main correspondant autour du message
+        let main = el.closest('main[aria-label]') || document.querySelector('main[aria-label]');
+        if (!main) return true;
+
+        const label = normalize(main.getAttribute('aria-label') || '');
         return label.includes(filter);
     }
 
-    // ---------- MESSAGE ----------
-    function handleMessage(li) {
-        if (!li) return;
-        const config = globalConfig;
-        if (!config) return;
+    // ---------- MESSAGE HELPERS ----------
+    function getMessageContainerFromNode(node) {
+        if (!node) return null;
+        let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        let depth = 0;
+        while (el && depth < 10) {
+            if (
+                el.tagName === 'LI' ||
+                (el.getAttribute && el.getAttribute('role') === 'article') ||
+                (el.dataset && el.dataset.listItemId)
+            ) {
+                return el;
+            }
+            el = el.parentElement;
+            depth++;
+        }
+        return null;
+    }
 
-        const id = li.getAttribute('id') || li.dataset.listItemId;
+    function getMessageId(container) {
+        if (!container) return null;
+        let id = container.getAttribute('id') || (container.dataset && container.dataset.listItemId);
+        if (!id) {
+            id = container.getAttribute('data-pdm-id');
+            if (!id) {
+                id = 'pdm-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+                container.setAttribute('data-pdm-id', id);
+            }
+        }
+        return id;
+    }
+
+    function handleMessageContainer(container) {
+        if (!container) return;
+        if (!globalConfig) return;
+        if (!isInTargetChannelForElement(container)) return;
+
+        const id = getMessageId(container);
         if (!id || openedSet.has(id)) return;
 
-        const text = normalize(li.innerText || '');
+        const text = normalize(container.innerText || '');
         if (!text) return;
 
-        for (const group of config.groups) {
+        for (const group of globalConfig.groups) {
             if (!group.enabled) continue;
 
             const includes = group.include || [];
             const excludes = group.exclude || [];
-
             if (!includes.length) continue;
 
             if (textContainsAll(text, includes) && textContainsNone(text, excludes)) {
-                const url = findBestLinkInMessage(li);
+                const url = findBestLinkInMessage(container);
                 if (url) {
                     addLogEntry({
                         time: new Date().toLocaleString(),
                         url,
                         messageId: id,
                         groupName: group.name || '',
-                        excerpt: (li.innerText || '').slice(0,140)
+                        excerpt: (container.innerText || '').slice(0,140)
                     });
 
-                    window.open(url, '_blank');
+                    try {
+                        GM_openInTab(url, { active: true, insert: true });
+                    } catch (e) {
+                        // fallback au cas où
+                        window.open(url, '_blank');
+                    }
 
                     openedSet.add(id);
                     saveOpened();
@@ -254,37 +293,50 @@
         }
     }
 
-    // 🔁 Rescan de tous les messages visibles (appelé après Sauvegarder)
-    function rescanExistingMessages() {
-        const list = document.querySelector('[data-list-id="chat-messages"]');
-        if (!list) return;
-        list.querySelectorAll('li').forEach(li => handleMessage(li));
+    function handlePossibleMessageNode(node) {
+        if (!node) return;
+        const container = getMessageContainerFromNode(node);
+        if (container) handleMessageContainer(container);
     }
 
-    // ---------- OBSERVER ----------
-    function initObserver() {
-        const list = document.querySelector('[data-list-id="chat-messages"]');
-        if (!list) return;
+    // Scan global (utilisé en secours et après sauvegarde)
+    function rescanExistingMessages() {
+        const candidates = document.querySelectorAll('li[role="article"], li[data-list-item-id], article[role="article"]');
+        candidates.forEach(el => handleMessageContainer(el));
+    }
 
-        // Premier passage
-        list.querySelectorAll('li').forEach(li => handleMessage(li));
-
-        new MutationObserver(mutations => {
-            for (const mut of mutations) {
-                for (const n of mut.addedNodes) {
-                    if (!(n instanceof HTMLElement)) continue;
-
-                    if (n.tagName === 'LI') {
-                        handleMessage(n);
-                    } else if (n.querySelectorAll) {
-                        n.querySelectorAll('li').forEach(li => handleMessage(li));
+    // ---------- OBSERVER GLOBAL ----------
+    function initGlobalObserver() {
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        handlePossibleMessageNode(node);
+                    } else if (node.nodeType === Node.ELEMENT_NODE) {
+                        handlePossibleMessageNode(node);
+                        // au cas où il y ait plusieurs messages dans le fragment
+                        node.querySelectorAll('li[role="article"], li[data-list-item-id], article[role="article"]').forEach(el => {
+                            handleMessageContainer(el);
+                        });
                     }
                 }
             }
-        }).observe(list, { childList: true, subtree: true });
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // Fallback : scan périodique (comme ton script MDLP)
+        const intervalId = setInterval(() => {
+            rescanExistingMessages();
+        }, 100); // 100 ms
+
+        console.log('[PokeDiscordMonitor] Surveillance DOM + scan périodique actifs.');
     }
 
-    // ---------- Position du panneau (près de la Boîte de réception) ----------
+    // ---------- POSITION DU PANNEAU (près de la Boîte de réception) ----------
     function positionPanel(panel) {
         try {
             const inbox =
@@ -293,12 +345,10 @@
 
             if (inbox) {
                 const r = inbox.getBoundingClientRect();
-                // On place le panneau sous la boîte de réception, légèrement décalé à gauche
                 panel.style.top  = (r.bottom + 8) + 'px';
                 panel.style.left = (r.left) + 'px';
                 panel.style.right = 'auto';
             } else {
-                // Position de secours si on ne trouve pas l'inbox
                 panel.style.top  = '80px';
                 panel.style.right = '10px';
                 panel.style.left  = 'auto';
@@ -370,7 +420,6 @@
         `;
         document.body.appendChild(panel);
 
-        // Positionner près de la Boîte de réception
         positionPanel(panel);
         window.addEventListener('resize', () => positionPanel(panel));
 
@@ -384,7 +433,6 @@
 
         channelInput.value = config.channelNameFilter || '';
 
-        // Minimise / agrandit la boîte
         let isMinimized = false;
         minimizeBtn.addEventListener('click', () => {
             isMinimized = !isMinimized;
@@ -481,7 +529,6 @@
         });
 
         panel.querySelector('#save').addEventListener('click', () => {
-            // Récupère la config depuis l’UI
             config.channelNameFilter = channelInput.value.trim();
 
             const newList = [];
@@ -501,12 +548,10 @@
             });
 
             config.groups = newList;
-
-            // Sauvegarde + applique en live
             globalConfig = config;
             saveConfig(config);
 
-            // 🔁 Re-scan immédiat des messages déjà visibles
+            // Re-scan immédiat des messages
             rescanExistingMessages();
         });
 
@@ -519,15 +564,8 @@
         globalConfig = cfg;
         loadOpened();
         createConfigPanel(cfg);
-
-        const interval = setInterval(() => {
-            if (!isOnTargetChannel()) return;
-            const list = document.querySelector('[data-list-id="chat-messages"]');
-            if (list) {
-                clearInterval(interval);
-                initObserver();
-            }
-        }, 800);
+        initGlobalObserver();
+        rescanExistingMessages(); // scan au démarrage
     }
 
     main();
