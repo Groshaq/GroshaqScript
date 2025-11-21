@@ -7,6 +7,8 @@
 // @match        https://discord.com/channels*
 // @grant        GM_openInTab
 // @run-at       document-end
+// @updateURL    https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20x%20LPA.user.js
+// @downloadURL  https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/MDLP%20x%20LPA.user.js
 // ==/UserScript==
 (function () {
     'use strict';
