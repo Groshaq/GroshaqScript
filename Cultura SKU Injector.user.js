@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cultura SKU Injector
 // @namespace    http://tampermonkey.net/
-// @version      1
+// @version      2
 // @description  Ajoute un produit Cultura via son SKU
 // @match        https://www.cultura.com/*
 // @run-at       document-start
@@ -122,14 +122,13 @@
             const cleanSku = sku.trim();
             if (!cleanSku) return;
 
-            // On prend en priorité la requête "live", sinon le template stocké
+            // 🔹 IDENTIQUE à ton script : live d'abord, sinon template stocké
             const baseUrl = state.url || state.storedUrl;
             const baseInit = state.init || state.storedInit;
 
             if (!baseUrl || !baseInit) {
-                // Fallback de sécurité, normalement on aura déjà alerté avant
                 throw new Error(
-                    'Ajoute un article au panier, puis clique sur le bouton "SKU Injector".'
+                    'Ajoute un article au panier à la main sur le site Cultura, puis reclique sur "SKU Injector".'
                 );
             }
 
@@ -141,7 +140,6 @@
                 throw new Error("Impossible de parser le body JSON de référence.");
             }
 
-            // On remplace le SKU
             if (
                 !payload ||
                 !payload.variables ||
@@ -187,6 +185,624 @@
             return json;
         }
 
+        // =========================
+        //   Données catégories / produits
+        // =========================
+        const SKU_CATEGORIES = [
+            {
+                name: 'ME2 Flammes Fantasmagoriques',
+                products: [
+                    { label: 'ETB', sku: '12369069' },
+                    { label: 'UPC', sku: '12435439' },
+                    { label: 'Booster', sku: '12369070' },
+                    { label: 'Tripack', sku: '12369071' }
+                ]
+            },
+            {
+                name: 'ME1 Mega-Evolution',
+                products: [
+                    { label: 'Mini Tins', sku: '12369064' },
+                    { label: 'Tripack', sku: '12369060' },
+                    { label: 'Booster', sku: '12369059' }
+                ]
+            },
+            {
+                name: 'EV8.5 Evolutions Prismatiques',
+                products: [
+                    { label: 'Coffret Premium Figurine', sku: '12169595' }
+                ]
+            },
+            {
+                name: 'ARTICLE TEST',
+                products: [
+                    { label: 'Calendrier de l’Avent en bois - Sapin tradition - Créalia', sku: '11896492' }
+                ]
+            }
+        ];
+
+        // =========================
+        //   Gestion de la popin moderne
+        // =========================
+        const modalState = {
+            overlay: null,
+            container: null,
+            skuInput: null,
+            addButton: null,
+            errorBox: null,
+            categoryList: null,
+            productList: null
+        };
+
+        // =========================
+        //   Popin d'information (pas de template)
+        // =========================
+        const infoModalState = {
+            overlay: null,
+            container: null,
+            messageBox: null
+        };
+
+        function createInfoModalIfNeeded() {
+            if (infoModalState.overlay) return;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'sku-injector-info-overlay';
+            Object.assign(overlay.style, {
+                position: 'fixed',
+                inset: '0',
+                background: 'rgba(0,0,0,0.45)',
+                display: 'none',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: '100001',
+                fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+            });
+
+            const dialog = document.createElement('div');
+            Object.assign(dialog.style, {
+                background: '#ffffff',
+                borderRadius: '10px',
+                boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
+                width: 'min(90vw, 420px)',
+                maxWidth: '420px',
+                overflow: 'hidden',
+                display: 'flex',
+                flexDirection: 'column'
+            });
+
+            const header = document.createElement('div');
+            header.textContent = 'Information';
+            Object.assign(header.style, {
+                padding: '10px 16px',
+                background: '#0066cc',
+                color: '#ffffff',
+                fontSize: '15px',
+                fontWeight: '600'
+            });
+
+            const body = document.createElement('div');
+            Object.assign(body.style, {
+                padding: '14px 16px',
+                fontSize: '13px',
+                color: '#111827'
+            });
+
+            const msg = document.createElement('div');
+            Object.assign(msg.style, {
+                marginBottom: '12px',
+                lineHeight: '1.5'
+            });
+
+            const buttonRow = document.createElement('div');
+            Object.assign(buttonRow.style, {
+                display: 'flex',
+                justifyContent: 'flex-end',
+                marginTop: '8px'
+            });
+
+            const okBtn = document.createElement('button');
+            okBtn.textContent = 'OK';
+            Object.assign(okBtn.style, {
+                padding: '6px 14px',
+                background: '#2563eb',
+                color: '#ffffff',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: '500'
+            });
+
+            okBtn.addEventListener('mouseenter', () => {
+                okBtn.style.background = '#1d4ed8';
+            });
+            okBtn.addEventListener('mouseleave', () => {
+                okBtn.style.background = '#2563eb';
+            });
+
+            okBtn.addEventListener('click', hideInfoModal);
+
+            buttonRow.appendChild(okBtn);
+            body.appendChild(msg);
+            body.appendChild(buttonRow);
+
+            dialog.appendChild(header);
+            dialog.appendChild(body);
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) hideInfoModal();
+            });
+
+            infoModalState.overlay = overlay;
+            infoModalState.container = dialog;
+            infoModalState.messageBox = msg;
+        }
+
+        function showInfoModal(message) {
+            createInfoModalIfNeeded();
+            if (infoModalState.messageBox) {
+                infoModalState.messageBox.innerHTML = message;
+            }
+            if (infoModalState.overlay) {
+                infoModalState.overlay.style.display = 'flex';
+            }
+        }
+
+        function hideInfoModal() {
+            if (infoModalState.overlay) {
+                infoModalState.overlay.style.display = 'none';
+            }
+        }
+
+        function createModalIfNeeded() {
+            if (modalState.overlay) return;
+
+            // Overlay
+            const overlay = document.createElement('div');
+            overlay.id = 'sku-injector-overlay';
+            Object.assign(overlay.style, {
+                position: 'fixed',
+                inset: '0',
+                background: 'rgba(0, 0, 0, 0.45)',
+                display: 'none',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: '100000',
+                fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+            });
+
+            // Container
+            const container = document.createElement('div');
+            Object.assign(container.style, {
+                background: '#ffffff',
+                borderRadius: '10px',
+                boxShadow: '0 12px 40px rgba(0, 0, 0, 0.25)',
+                width: 'min(90vw, 640px)',
+                maxHeight: '80vh',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden'
+            });
+
+            // Header (bandeau BLEU)
+            const header = document.createElement('div');
+            Object.assign(header.style, {
+                padding: '12px 20px',
+                borderBottom: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                background: '#0066cc',
+                color: '#ffffff'
+            });
+
+            const title = document.createElement('div');
+            title.textContent = 'Cultura SKU Injector';
+            Object.assign(title.style, {
+                fontSize: '16px',
+                fontWeight: '600',
+                color: '#ffffff'
+            });
+
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '×';
+            Object.assign(closeBtn.style, {
+                border: 'none',
+                background: 'transparent',
+                fontSize: '20px',
+                lineHeight: '1',
+                cursor: 'pointer',
+                padding: '0 4px',
+                color: '#ffffff'
+            });
+
+            closeBtn.addEventListener('mouseenter', () => {
+                closeBtn.style.opacity = '0.8';
+            });
+            closeBtn.addEventListener('mouseleave', () => {
+                closeBtn.style.opacity = '1';
+            });
+
+            closeBtn.addEventListener('click', hideModal);
+            overlay.addEventListener('click', function (e) {
+                if (e.target === overlay) hideModal();
+            });
+
+            header.appendChild(title);
+            header.appendChild(closeBtn);
+
+            // Body
+            const body = document.createElement('div');
+            Object.assign(body.style, {
+                display: 'flex',
+                gap: '16px',
+                padding: '16px 20px',
+                flex: '1',
+                overflow: 'hidden',
+                background: '#f9fafb'
+            });
+
+            // Colonne catégories
+            const colLeft = document.createElement('div');
+            Object.assign(colLeft.style, {
+                width: '38%',
+                borderRight: '1px solid #e5e7eb',
+                paddingRight: '12px',
+                paddingLeft: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                background: '#ffffff',
+                borderRadius: '8px',
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.02)'
+            });
+
+            const catTitle = document.createElement('div');
+            catTitle.textContent = 'CATÉGORIES';
+            Object.assign(catTitle.style, {
+                fontSize: '13px',
+                fontWeight: '600',
+                margin: '10px 10px 6px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+                color: '#555'
+            });
+
+            const catList = document.createElement('div');
+            Object.assign(catList.style, {
+                overflowY: 'auto',
+                padding: '0 6px 10px'
+            });
+
+            colLeft.appendChild(catTitle);
+            colLeft.appendChild(catList);
+
+            // Colonne produits + saisie
+            const colRight = document.createElement('div');
+            Object.assign(colRight.style, {
+                width: '62%',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+                background: '#ffffff',
+                borderRadius: '8px',
+                padding: '10px 12px',
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.02)'
+            });
+
+            const prodTitle = document.createElement('div');
+            prodTitle.textContent = 'PRODUITS';
+            Object.assign(prodTitle.style, {
+                fontSize: '13px',
+                fontWeight: '600',
+                marginBottom: '4px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+                color: '#555'
+            });
+
+            const prodList = document.createElement('div');
+            Object.assign(prodList.style, {
+                flex: '1',
+                overflowY: 'auto',
+                borderRadius: '6px',
+                border: '1px solid #f0f0f0',
+                padding: '6px',
+                background: '#f9fafb'
+            });
+
+            // Zone saisie / actions
+            const formArea = document.createElement('div');
+            Object.assign(formArea.style, {
+                marginTop: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px'
+            });
+
+            const skuLabel = document.createElement('label');
+            skuLabel.textContent = 'SKU à ajouter au panier';
+            Object.assign(skuLabel.style, {
+                fontSize: '13px',
+                fontWeight: '500'
+            });
+
+            const skuInput = document.createElement('input');
+            skuInput.type = 'text';
+            skuInput.placeholder = 'Ex : 12212415 (doit commencer par 1xxxxx)';
+            Object.assign(skuInput.style, {
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '13px',
+                outline: 'none',
+                background: '#f9fafb'
+            });
+            skuInput.addEventListener('focus', () => {
+                skuInput.style.borderColor = '#2563eb';
+                skuInput.style.boxShadow = '0 0 0 1px rgba(37, 99, 235, 0.4)';
+                skuInput.style.background = '#ffffff';
+            });
+            skuInput.addEventListener('blur', () => {
+                skuInput.style.borderColor = '#d1d5db';
+                skuInput.style.boxShadow = 'none';
+                skuInput.style.background = '#f9fafb';
+            });
+
+            const actionsRow = document.createElement('div');
+            Object.assign(actionsRow.style, {
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+                marginTop: '4px'
+            });
+
+            const hint = document.createElement('div');
+            hint.textContent = 'Clique sur un produit pour remplir le SKU, ou saisis-le manuellement.';
+            Object.assign(hint.style, {
+                fontSize: '11px',
+                color: '#6b7280'
+            });
+
+            const addButton = document.createElement('button');
+            addButton.textContent = 'Ajouter au panier';
+            Object.assign(addButton.style, {
+                whiteSpace: 'nowrap',
+                padding: '8px 12px',
+                background: '#2563eb',
+                color: '#ffffff',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: '500',
+                boxShadow: '0 1px 4px rgba(37,99,235,0.35)'
+            });
+
+            addButton.addEventListener('mouseenter', () => {
+                if (!addButton.disabled) {
+                    addButton.style.background = '#1d4ed8';
+                }
+            });
+            addButton.addEventListener('mouseleave', () => {
+                if (!addButton.disabled) {
+                    addButton.style.background = '#2563eb';
+                }
+            });
+
+            const errorBox = document.createElement('div');
+            Object.assign(errorBox.style, {
+                fontSize: '11px',
+                color: '#b91c1c',
+                minHeight: '14px'
+            });
+
+            actionsRow.appendChild(hint);
+            actionsRow.appendChild(addButton);
+
+            formArea.appendChild(skuLabel);
+            formArea.appendChild(skuInput);
+            formArea.appendChild(actionsRow);
+            formArea.appendChild(errorBox);
+
+            colRight.appendChild(prodTitle);
+            colRight.appendChild(prodList);
+            colRight.appendChild(formArea);
+
+            body.appendChild(colLeft);
+            body.appendChild(colRight);
+
+            container.appendChild(header);
+            container.appendChild(body);
+            overlay.appendChild(container);
+            document.body.appendChild(overlay);
+
+            // Stockage des références
+            modalState.overlay = overlay;
+            modalState.container = container;
+            modalState.skuInput = skuInput;
+            modalState.addButton = addButton;
+            modalState.errorBox = errorBox;
+            modalState.categoryList = catList;
+            modalState.productList = prodList;
+
+            setupCategoriesUI();
+            setupAddButtonLogic();
+        }
+
+        function setupCategoriesUI() {
+            const catList = modalState.categoryList;
+            const prodList = modalState.productList;
+            if (!catList || !prodList) return;
+
+            catList.innerHTML = '';
+            prodList.innerHTML = '';
+
+            let activeCategoryIndex = 0;
+
+            function renderCategories() {
+                catList.innerHTML = '';
+                SKU_CATEGORIES.forEach((cat, index) => {
+                    const item = document.createElement('div');
+                    item.textContent = cat.name;
+                    Object.assign(item.style, {
+                        padding: '6px 10px',
+                        marginBottom: '4px',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        cursor: 'pointer',
+                        border: index === activeCategoryIndex ? '1px solid #2563eb' : '1px solid transparent',
+                        background: index === activeCategoryIndex ? 'rgba(37,99,235,0.08)' : 'transparent',
+                        color: index === activeCategoryIndex ? '#1d4ed8' : '#111827'
+                    });
+                    item.addEventListener('click', () => {
+                        activeCategoryIndex = index;
+                        renderCategories();
+                        renderProducts();
+                    });
+                    catList.appendChild(item);
+                });
+            }
+
+            function renderProducts() {
+                prodList.innerHTML = '';
+                const cat = SKU_CATEGORIES[activeCategoryIndex];
+                if (!cat) return;
+
+                cat.products.forEach(prod => {
+                    const row = document.createElement('button');
+                    row.type = 'button';
+                    Object.assign(row.style, {
+                        width: '100%',
+                        textAlign: 'left',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        padding: '6px 8px',
+                        marginBottom: '4px',
+                        borderRadius: '6px',
+                        border: '1px solid #e5e7eb',
+                        background: '#ffffff',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        boxShadow: '0 1px 2px rgba(15,23,42,0.05)'
+                    });
+
+                    row.addEventListener('mouseenter', () => {
+                        row.style.borderColor = '#2563eb';
+                        row.style.background = '#f9fafb';
+                    });
+                    row.addEventListener('mouseleave', () => {
+                        row.style.borderColor = '#e5e7eb';
+                        row.style.background = '#ffffff';
+                    });
+
+                    const line1 = document.createElement('div');
+                    line1.textContent = prod.label;
+                    Object.assign(line1.style, {
+                        fontWeight: '500',
+                        marginBottom: '2px'
+                    });
+
+                    const line2 = document.createElement('div');
+                    line2.textContent = 'SKU ' + prod.sku;
+                    Object.assign(line2.style, {
+                        color: '#4b5563',
+                        fontFamily: 'monospace',
+                        fontSize: '11px'
+                    });
+
+                    row.appendChild(line1);
+                    row.appendChild(line2);
+
+                    row.addEventListener('click', () => {
+                        if (modalState.skuInput) {
+                            modalState.skuInput.value = prod.sku;
+                            modalState.skuInput.focus();
+                            modalState.skuInput.select();
+                        }
+                    });
+
+                    prodList.appendChild(row);
+                });
+            }
+
+            renderCategories();
+            renderProducts();
+        }
+
+        function setupAddButtonLogic() {
+            const btn = modalState.addButton;
+            const input = modalState.skuInput;
+            const errorBox = modalState.errorBox;
+            if (!btn || !input) return;
+
+            function setLoading(isLoading) {
+                btn.disabled = isLoading;
+                btn.textContent = isLoading ? 'Ajout en cours...' : 'Ajouter au panier';
+                btn.style.opacity = isLoading ? '0.7' : '1';
+                btn.style.cursor = isLoading ? 'default' : 'pointer';
+            }
+
+            btn.addEventListener('click', async () => {
+                if (!input.value.trim()) {
+                    if (errorBox) {
+                        errorBox.textContent = 'Merci de saisir ou de sélectionner un SKU.';
+                    }
+                    input.focus();
+                    return;
+                }
+
+                if (errorBox) errorBox.textContent = '';
+
+                setLoading(true);
+                try {
+                    await sendAddToCartWithSku(input.value);
+                    hideModal();
+                    window.open("https://www.cultura.com/checkout#panier", "_blank");
+                } catch (e) {
+                    alert("SKU Injector : " + e.message);
+                    if (errorBox) {
+                        errorBox.textContent = e.message || 'Une erreur est survenue.';
+                    }
+                } finally {
+                    setLoading(false);
+                }
+            });
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    btn.click();
+                }
+            });
+        }
+
+        function showModal() {
+            createModalIfNeeded();
+            if (modalState.overlay) {
+                modalState.overlay.style.display = 'flex';
+            }
+            if (modalState.skuInput) {
+                modalState.skuInput.focus();
+                modalState.skuInput.select();
+            }
+            if (modalState.errorBox) {
+                modalState.errorBox.textContent = '';
+            }
+        }
+
+        function hideModal() {
+            if (modalState.overlay) {
+                modalState.overlay.style.display = 'none';
+            }
+        }
+
+        // =========================
+        //   Bouton flottant principal
+        // =========================
         function createButton() {
             if (document.getElementById('sku-injector-btn')) return;
 
@@ -213,35 +829,23 @@
             btn.addEventListener('mouseenter', () => btn.style.background = '#0050a8');
             btn.addEventListener('mouseleave', () => btn.style.background = '#0066cc');
 
-            btn.addEventListener('click', async () => {
-
-                // 🔹 1) AVANT toute saisie de SKU, on vérifie qu'on a bien un template
+            btn.addEventListener('click', () => {
                 const hasTemplate = !!(state.url || state.storedUrl) && !!(state.init || state.storedInit);
                 if (!hasTemplate) {
-                    // Message d'erreur dès le clic sur le bouton
-                    alert(
-                        'Cultura SKU Injector\n\n' +
-                        'Ajoute un article au panier, puis clique sur le bouton "SKU Injector".'
-                    );
+                showInfoModal(
+    "Aucun panier de référence détecté.<br><br>" +
+    "<strong>Étapes nécessaires :</strong><br><br>" +
+    "1️⃣ Ajoute d’abord un article au panier <strong>à la main</strong> sur le site Cultura.<br>" +
+    "&nbsp;&nbsp;&nbsp;&nbsp;→ Utilise le bouton « Ajouter au panier » sur n’importe quel produit.<br><br>" +
+    "2️⃣ Reviens ensuite cliquer sur « SKU Injector » pour débloquer l’outil.<br><br>" +
+    "ℹ️ Astuce : n’importe quel article fonctionne, il sert juste à initialiser le panier."
+);
+
+
                     return;
                 }
 
-                // 🔹 2) Si on a déjà un template, on peut demander le SKU
-                const sku = prompt('SKU à injecter dans le panier ? Le SKU doit comment par 1xxxxx (exemple: 12212415)');
-                if (!sku) return;
-
-                btn.disabled = true;
-                btn.textContent = 'Ajout...';
-
-                try {
-                    await sendAddToCartWithSku(sku);
-                    window.open("https://www.cultura.com/checkout#panier", "_blank");
-                } catch (e) {
-                    alert("SKU Injector : " + e.message);
-                } finally {
-                    btn.disabled = false;
-                    btn.textContent = 'SKU Injector';
-                }
+                showModal();
             });
 
             document.body.appendChild(btn);
