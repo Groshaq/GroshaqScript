@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cultura SKU Injector
 // @namespace    http://tampermonkey.net/
-// @version      3
+// @version      4
 // @description  Ajoute un produit Cultura via son SKU
 // @match        https://www.cultura.com/*
 // @run-at       document-start
@@ -27,20 +27,30 @@
         const CUSTOM_CATEGORIES_STORAGE_KEY = 'culturaSkuInjectorCustomCategories';
         const CATEGORY_ORDER_STORAGE_KEY = 'culturaSkuInjectorCategoryOrder';
         const PRODUCT_ORDER_STORAGE_KEY = 'culturaSkuInjectorProductOrder';
+        const RETRY_DELAY_STORAGE_KEY = 'culturaSkuInjectorRetryDelayMs';
+        const RETRY_STATE_STORAGE_KEY = 'culturaSkuInjectorRetryState';
+        const RETRY_STOP_STORAGE_KEY = 'culturaSkuInjectorRetryStopRequested';
+        const DEFAULT_RETRY_DELAY_MS = 250;
 
         const state = {
             url: null,
             init: null,
             storedUrl: null,
-            storedInit: null
+            storedInit: null,
+            retryTimerId: null,
+            retryLoopRunning: false,
+            isMobileLayout: false
         };
 
         const catalogState = {
             customCategories: [],
             activeCategoryName: null,
             isEditorOpen: false,
+            isRetryPanelOpen: false,
+            isCategoryPanelOpen: false,
             categoryOrder: [],
-            productOrder: {}
+            productOrder: {},
+            retryDelayMs: DEFAULT_RETRY_DELAY_MS
         };
 
         function cloneHeaders(headers) {
@@ -136,6 +146,76 @@
                 console.warn('[SKU Injector] Impossible de charger l’ordre des produits', e);
             }
         })();
+
+        (function loadRetryDelay() {
+            try {
+                const raw = localStorage.getItem(RETRY_DELAY_STORAGE_KEY);
+                const parsed = raw ? Number(raw) : NaN;
+                if (Number.isFinite(parsed) && parsed >= 0) {
+                    catalogState.retryDelayMs = Math.round(parsed);
+                }
+            } catch (e) {
+                console.warn('[SKU Injector] Impossible de charger le délai de retry', e);
+            }
+        })();
+
+        function saveRetryDelay(delayMs) {
+            catalogState.retryDelayMs = delayMs;
+            localStorage.setItem(RETRY_DELAY_STORAGE_KEY, String(delayMs));
+        }
+
+        function getRetryState() {
+            try {
+                const raw = sessionStorage.getItem(RETRY_STATE_STORAGE_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || !parsed.active || !parsed.sku) return null;
+                return {
+                    active: true,
+                    sku: String(parsed.sku).trim(),
+                    delayMs: Math.max(0, Math.round(Number(parsed.delayMs) || DEFAULT_RETRY_DELAY_MS)),
+                    count: Math.max(0, Math.round(Number(parsed.count) || 0)),
+                    status: parsed.status ? String(parsed.status) : 'Retry actif'
+                };
+            } catch (e) {
+                console.warn('[SKU Injector] Impossible de lire l’état du retry', e);
+                return null;
+            }
+        }
+
+        function setRetryState(retryState) {
+            sessionStorage.setItem(RETRY_STATE_STORAGE_KEY, JSON.stringify(retryState));
+        }
+
+        function clearRetryState() {
+            sessionStorage.removeItem(RETRY_STATE_STORAGE_KEY);
+        }
+
+        function setRetryStopRequested(isRequested) {
+            if (isRequested) {
+                sessionStorage.setItem(RETRY_STOP_STORAGE_KEY, '1');
+            } else {
+                sessionStorage.removeItem(RETRY_STOP_STORAGE_KEY);
+            }
+        }
+
+        function isRetryStopRequested() {
+            return sessionStorage.getItem(RETRY_STOP_STORAGE_KEY) === '1';
+        }
+
+        function wait(ms) {
+            return new Promise(resolve => {
+                state.retryTimerId = window.setTimeout(resolve, ms);
+            });
+        }
+
+        function isMobileViewport() {
+            return window.innerWidth <= 760;
+        }
+
+        function isCartPage() {
+            return window.location.href.includes('/checkout#panier');
+        }
 
         function saveCategoryOrder() {
             localStorage.setItem(CATEGORY_ORDER_STORAGE_KEY, JSON.stringify(catalogState.categoryOrder));
@@ -526,6 +606,8 @@
             container: null,
             skuInput: null,
             addButton: null,
+            retryButton: null,
+            retryDelayInput: null,
             errorBox: null,
             categoryList: null,
             productList: null,
@@ -535,7 +617,8 @@
             saveItemButton: null,
             saveItemMessage: null,
             editorPanel: null,
-            editorToggleButton: null
+            editorToggleButton: null,
+            categoryToggleButton: null
         };
 
         // =========================
@@ -838,6 +921,34 @@
                 gap: '12px'
             });
 
+            const categoryToggleButton = document.createElement('button');
+            categoryToggleButton.type = 'button';
+            categoryToggleButton.textContent = 'Categories';
+            Object.assign(categoryToggleButton.style, {
+                display: 'none',
+                whiteSpace: 'nowrap',
+                padding: '7px 12px',
+                background: '#eef4ff',
+                color: '#1d4ed8',
+                borderRadius: '999px',
+                border: '1px solid #bfdbfe',
+                cursor: 'pointer',
+                fontSize: '12px',
+                fontWeight: '600'
+            });
+            categoryToggleButton.addEventListener('click', () => {
+                catalogState.isCategoryPanelOpen = !catalogState.isCategoryPanelOpen;
+                applyResponsiveLayout();
+                if (catalogState.isCategoryPanelOpen && modalState.categoryList) {
+                    window.requestAnimationFrame(() => {
+                        const categoryPanel = modalState.categoryList.parentElement;
+                        if (categoryPanel && typeof categoryPanel.scrollIntoView === 'function') {
+                            categoryPanel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                        }
+                    });
+                }
+            });
+
             const prodHeaderText = document.createElement('div');
             Object.assign(prodHeaderText.style, {
                 display: 'flex',
@@ -863,6 +974,7 @@
             prodHeaderText.appendChild(prodTitle);
             prodHeaderText.appendChild(prodSubtitle);
             prodHeader.appendChild(prodHeaderText);
+            prodHeader.appendChild(categoryToggleButton);
 
             const prodList = document.createElement('div');
             Object.assign(prodList.style, {
@@ -929,6 +1041,16 @@
                 marginTop: '2px'
             });
 
+            const actionsRight = document.createElement('div');
+            Object.assign(actionsRight.style, {
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                flexShrink: '0',
+                flexWrap: 'wrap',
+                justifyContent: 'flex-end'
+            });
+
             const hint = document.createElement('div');
             hint.textContent = 'Clique sur un produit pour remplir le SKU, ou saisis-le manuellement.';
             Object.assign(hint.style, {
@@ -961,6 +1083,61 @@
             addButton.addEventListener('mouseleave', () => {
                 if (!addButton.disabled) {
                     addButton.style.background = '#2563eb';
+                }
+            });
+
+            const retryDelayInput = document.createElement('input');
+            retryDelayInput.type = 'number';
+            retryDelayInput.min = '0';
+            retryDelayInput.step = '50';
+            retryDelayInput.value = String(catalogState.retryDelayMs);
+            retryDelayInput.title = 'Délai entre chaque tentative (ms)';
+            Object.assign(retryDelayInput.style, {
+                width: '78px',
+                padding: '8px 10px',
+                height: '36px',
+                minHeight: '36px',
+                lineHeight: '20px',
+                borderRadius: '999px',
+                border: '1px solid #d1d5db',
+                fontSize: '12px',
+                background: '#ffffff',
+                boxSizing: 'border-box',
+                textAlign: 'center'
+            });
+
+            const retryDelaySuffix = document.createElement('div');
+            retryDelaySuffix.textContent = 'ms';
+            Object.assign(retryDelaySuffix.style, {
+                fontSize: '12px',
+                color: '#64748b',
+                marginLeft: '-4px'
+            });
+
+            const retryButton = document.createElement('button');
+            retryButton.type = 'button';
+            retryButton.textContent = 'Retry';
+            Object.assign(retryButton.style, {
+                whiteSpace: 'nowrap',
+                padding: '8px 12px',
+                background: '#0f766e',
+                color: '#ffffff',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: '500',
+                boxShadow: '0 1px 4px rgba(15,118,110,0.28)'
+            });
+
+            retryButton.addEventListener('mouseenter', () => {
+                if (!retryButton.disabled) {
+                    retryButton.style.background = '#0b5f59';
+                }
+            });
+            retryButton.addEventListener('mouseleave', () => {
+                if (!retryButton.disabled) {
+                    retryButton.style.background = '#0f766e';
                 }
             });
 
@@ -1085,8 +1262,13 @@
 
             editorPanel.appendChild(saveBox);
 
+            actionsRight.appendChild(retryDelayInput);
+            actionsRight.appendChild(retryDelaySuffix);
+            actionsRight.appendChild(retryButton);
+            actionsRight.appendChild(addButton);
+
             actionsRow.appendChild(hint);
-            actionsRow.appendChild(addButton);
+            actionsRow.appendChild(actionsRight);
 
             formArea.appendChild(skuLabel);
             formArea.appendChild(skuInput);
@@ -1111,6 +1293,8 @@
             modalState.container = container;
             modalState.skuInput = skuInput;
             modalState.addButton = addButton;
+            modalState.retryButton = retryButton;
+            modalState.retryDelayInput = retryDelayInput;
             modalState.errorBox = errorBox;
             modalState.categoryList = catList;
             modalState.productList = prodList;
@@ -1121,10 +1305,12 @@
             modalState.saveItemMessage = saveItemMessage;
             modalState.editorPanel = editorPanel;
             modalState.editorToggleButton = editorToggleButton;
+            modalState.categoryToggleButton = categoryToggleButton;
 
             setupCategoriesUI();
             setupAddButtonLogic();
             setupCatalogFormLogic();
+            applyResponsiveLayout();
         }
 
         function setupCategoriesUI() {
@@ -1302,6 +1488,10 @@
                             modalState.skuInput.focus();
                             modalState.skuInput.select();
                         }
+                        const retrySkuInput = document.getElementById('sku-injector-retry-sku');
+                        if (retrySkuInput) {
+                            retrySkuInput.value = prod.sku;
+                        }
                     });
 
                     const controls = document.createElement('div');
@@ -1413,15 +1603,32 @@
 
         function setupAddButtonLogic() {
             const btn = modalState.addButton;
+            const retryBtn = modalState.retryButton;
+            const retryDelayInput = modalState.retryDelayInput;
             const input = modalState.skuInput;
             const errorBox = modalState.errorBox;
-            if (!btn || !input) return;
+            if (!btn || !retryBtn || !retryDelayInput || !input) return;
+
+            function getRetryDelayMs() {
+                const parsed = Number(retryDelayInput.value);
+                if (!Number.isFinite(parsed) || parsed < 0) {
+                    throw new Error('Le délai de retry doit être un nombre en millisecondes.');
+                }
+                const normalized = Math.round(parsed);
+                retryDelayInput.value = String(normalized);
+                saveRetryDelay(normalized);
+                return normalized;
+            }
 
             function setLoading(isLoading) {
                 btn.disabled = isLoading;
+                retryBtn.disabled = isLoading;
+                retryDelayInput.disabled = isLoading;
                 btn.textContent = isLoading ? 'Ajout en cours...' : 'Ajouter au panier';
                 btn.style.opacity = isLoading ? '0.7' : '1';
                 btn.style.cursor = isLoading ? 'default' : 'pointer';
+                retryBtn.style.opacity = isLoading ? '0.7' : '1';
+                retryBtn.style.cursor = isLoading ? 'default' : 'pointer';
             }
 
             btn.addEventListener('click', async () => {
@@ -1450,6 +1657,41 @@
                 }
             });
 
+            retryBtn.addEventListener('click', () => {
+                if (!input.value.trim()) {
+                    if (errorBox) {
+                        errorBox.textContent = 'Merci de saisir ou de sélectionner un SKU.';
+                    }
+                    input.focus();
+                    return;
+                }
+
+                let delayMs;
+                try {
+                    delayMs = getRetryDelayMs();
+                } catch (e) {
+                    if (errorBox) {
+                        errorBox.textContent = e.message || 'Délai de retry invalide.';
+                    }
+                    retryDelayInput.focus();
+                    retryDelayInput.select();
+                    return;
+                }
+
+                setRetryState({
+                    active: true,
+                    sku: input.value.trim(),
+                    delayMs,
+                    count: 0,
+                    status: 'Retry actif'
+                });
+
+                catalogState.isRetryPanelOpen = true;
+                hideModal();
+                syncRetryControls();
+                goToCartAndRunRetry();
+            });
+
             input.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
@@ -1458,8 +1700,354 @@
             });
         }
 
+        function stopRetryLoop() {
+            setRetryStopRequested(true);
+            if (state.retryTimerId) {
+                clearTimeout(state.retryTimerId);
+                state.retryTimerId = null;
+            }
+            state.retryLoopRunning = false;
+            clearRetryState();
+            syncRetryControls();
+        }
+
+        function createFabContainerIfNeeded() {
+            let container = document.getElementById('sku-injector-fab-container');
+            if (container) return container;
+
+            container = document.createElement('div');
+            container.id = 'sku-injector-fab-container';
+            Object.assign(container.style, {
+                position: 'fixed',
+                bottom: '20px',
+                right: '20px',
+                zIndex: '99999',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                flexWrap: 'wrap',
+                justifyContent: 'flex-end',
+                maxWidth: 'min(92vw, 900px)'
+            });
+
+            document.body.appendChild(container);
+            return container;
+        }
+
+        function applyFabResponsiveLayout() {
+            const container = document.getElementById('sku-injector-fab-container');
+            if (!container) return;
+
+            const isMobile = isMobileViewport();
+            Object.assign(container.style, isMobile ? {
+                bottom: '12px',
+                right: '12px',
+                left: '12px',
+                maxWidth: 'none',
+                justifyContent: 'space-between'
+            } : {
+                bottom: '20px',
+                right: '20px',
+                left: '',
+                maxWidth: 'min(92vw, 900px)',
+                justifyContent: 'flex-end'
+            });
+        }
+
+        function syncRetryControls() {
+            const container = document.getElementById('sku-injector-fab-container');
+            if (!container) return;
+            applyFabResponsiveLayout();
+
+            const retryState = getRetryState();
+            const isRunning = !!retryState;
+            if (isRunning) {
+                catalogState.isRetryPanelOpen = true;
+            }
+
+            let wrapper = document.getElementById('sku-injector-retry-wrapper');
+            let launcherButton = document.getElementById('sku-injector-retry-launcher');
+            let panel = document.getElementById('sku-injector-retry-panel');
+            let skuInput = document.getElementById('sku-injector-retry-sku');
+            let delayInput = document.getElementById('sku-injector-retry-delay');
+            let toggleButton = document.getElementById('sku-injector-retry-toggle');
+
+            if (!wrapper) {
+                wrapper = document.createElement('div');
+                wrapper.id = 'sku-injector-retry-wrapper';
+                Object.assign(wrapper.style, {
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    flexWrap: 'wrap',
+                    justifyContent: 'flex-end'
+                });
+
+                launcherButton = document.createElement('button');
+                launcherButton.id = 'sku-injector-retry-launcher';
+                launcherButton.type = 'button';
+                launcherButton.textContent = 'Auto-Retry';
+                Object.assign(launcherButton.style, {
+                    padding: '10px 16px',
+                    background: '#0066cc',
+                    color: '#ffffff',
+                    borderRadius: '4px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 6px rgba(0, 0, 0, 0.2)',
+                    fontSize: '14px',
+                    fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+                });
+
+                launcherButton.addEventListener('mouseenter', () => {
+                    launcherButton.style.background = '#0050a8';
+                });
+                launcherButton.addEventListener('mouseleave', () => {
+                    launcherButton.style.background = '#0066cc';
+                });
+                launcherButton.addEventListener('click', () => {
+                    catalogState.isRetryPanelOpen = !catalogState.isRetryPanelOpen;
+                    syncRetryControls();
+                });
+
+                panel = document.createElement('div');
+                panel.id = 'sku-injector-retry-panel';
+                Object.assign(panel.style, {
+                    display: 'none',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px',
+                    background: '#ffffff',
+                    borderRadius: '999px',
+                    boxShadow: '0 2px 10px rgba(15,23,42,0.14)',
+                    border: '1px solid #dbe2ea'
+                });
+
+                skuInput = document.createElement('input');
+                skuInput.id = 'sku-injector-retry-sku';
+                skuInput.type = 'text';
+                skuInput.placeholder = 'SKU';
+                Object.assign(skuInput.style, {
+                    width: '110px',
+                    height: '34px',
+                    padding: '6px 10px',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    boxSizing: 'border-box',
+                    background: '#ffffff'
+                });
+
+                delayInput = document.createElement('input');
+                delayInput.id = 'sku-injector-retry-delay';
+                delayInput.type = 'number';
+                delayInput.min = '0';
+                delayInput.step = '50';
+                Object.assign(delayInput.style, {
+                    width: '72px',
+                    height: '34px',
+                    padding: '6px 10px',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    boxSizing: 'border-box',
+                    textAlign: 'center',
+                    background: '#ffffff'
+                });
+
+                const msLabel = document.createElement('div');
+                msLabel.textContent = 'ms';
+                Object.assign(msLabel.style, {
+                    fontSize: '12px',
+                    color: '#64748b'
+                });
+
+                toggleButton = document.createElement('button');
+                toggleButton.id = 'sku-injector-retry-toggle';
+                toggleButton.type = 'button';
+                Object.assign(toggleButton.style, {
+                    height: '34px',
+                    padding: '6px 12px',
+                    border: 'none',
+                    borderRadius: '999px',
+                    color: '#ffffff',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    fontWeight: '700',
+                    whiteSpace: 'nowrap'
+                });
+
+                toggleButton.addEventListener('click', () => {
+                    const currentRetryState = getRetryState();
+                    if (currentRetryState) {
+                        stopRetryLoop();
+                        return;
+                    }
+
+                    const sku = skuInput.value.trim();
+                    const delayMs = Math.max(0, Math.round(Number(delayInput.value) || 0));
+                    if (!sku) {
+                        skuInput.focus();
+                        return;
+                    }
+
+                    setRetryStopRequested(false);
+                    delayInput.value = String(delayMs);
+                    saveRetryDelay(delayMs);
+                    setRetryState({
+                        active: true,
+                        sku,
+                        delayMs,
+                        count: 0,
+                        status: 'Retry actif'
+                    });
+                    syncRetryControls();
+                    goToCartAndRunRetry();
+                });
+
+                skuInput.addEventListener('change', () => {
+                    const currentRetryState = getRetryState();
+                    if (currentRetryState) {
+                        setRetryState({
+                            ...currentRetryState,
+                            sku: skuInput.value.trim()
+                        });
+                    }
+                });
+
+                delayInput.addEventListener('change', () => {
+                    const delayMs = Math.max(0, Math.round(Number(delayInput.value) || 0));
+                    delayInput.value = String(delayMs);
+                    saveRetryDelay(delayMs);
+                    const currentRetryState = getRetryState();
+                    if (currentRetryState) {
+                        setRetryState({
+                            ...currentRetryState,
+                            delayMs
+                        });
+                    }
+                    syncRetryControls();
+                });
+
+                panel.appendChild(skuInput);
+                panel.appendChild(delayInput);
+                panel.appendChild(msLabel);
+                panel.appendChild(toggleButton);
+                wrapper.appendChild(launcherButton);
+                wrapper.appendChild(panel);
+                container.appendChild(wrapper);
+            }
+
+            skuInput.value = retryState ? retryState.sku : (skuInput.value || '');
+            delayInput.value = String(retryState ? retryState.delayMs : catalogState.retryDelayMs);
+
+            launcherButton.textContent = isRunning ? 'Auto-Retry actif' : 'Auto-Retry';
+            launcherButton.style.background = isRunning ? '#0f766e' : '#0066cc';
+            panel.style.display = (catalogState.isRetryPanelOpen || isRunning) ? 'flex' : 'none';
+            toggleButton.textContent = isRunning
+                ? 'Retry ON (' + retryState.count + ')'
+                : 'Retry OFF';
+            toggleButton.title = isRunning ? (retryState.status || 'Retry actif') : 'Démarrer le retry';
+            toggleButton.style.background = isRunning ? '#0f766e' : '#b91c1c';
+            toggleButton.style.boxShadow = isRunning
+                ? '0 2px 6px rgba(15,118,110,0.30)'
+                : '0 2px 6px rgba(185,28,28,0.30)';
+            skuInput.disabled = false;
+            delayInput.disabled = false;
+        }
+
+        async function startRetryLoop() {
+            const retryState = getRetryState();
+            if (!retryState || state.retryLoopRunning) return;
+            if (isRetryStopRequested()) {
+                setRetryStopRequested(false);
+                clearRetryState();
+                syncRetryControls();
+                return;
+            }
+
+            state.retryLoopRunning = true;
+            syncRetryControls();
+
+            while (getRetryState()) {
+                if (isRetryStopRequested()) {
+                    setRetryStopRequested(false);
+                    clearRetryState();
+                    break;
+                }
+
+                const currentState = getRetryState();
+                if (!currentState) break;
+
+                const attemptState = {
+                    ...currentState,
+                    count: currentState.count + 1,
+                    status: 'Tentative ' + (currentState.count + 1)
+                };
+                setRetryState(attemptState);
+                syncRetryControls();
+
+                try {
+                    await sendAddToCartWithSku(attemptState.sku);
+                    const successState = {
+                        ...attemptState,
+                        status: 'Tentative ' + attemptState.count + ' envoyée'
+                    };
+                    setRetryState(successState);
+                    syncRetryControls();
+                } catch (e) {
+                    const nextState = {
+                        ...attemptState,
+                        status: (e && e.message) || 'Tentative échouée'
+                    };
+                    setRetryState(nextState);
+                    syncRetryControls();
+                }
+
+                const latestState = getRetryState();
+                if (!latestState) break;
+
+                await wait(latestState.delayMs);
+
+                if (getRetryState()) {
+                    if (isRetryStopRequested()) {
+                        setRetryStopRequested(false);
+                        clearRetryState();
+                        break;
+                    }
+                    if (!isCartPage()) {
+                        window.location.href = 'https://www.cultura.com/checkout#panier';
+                        state.retryLoopRunning = false;
+                        return;
+                    }
+                    window.location.reload();
+                    state.retryLoopRunning = false;
+                    return;
+                }
+            }
+
+            state.retryLoopRunning = false;
+            syncRetryControls();
+        }
+
+        function goToCartAndRunRetry() {
+            if (isCartPage()) {
+                startRetryLoop();
+                return;
+            }
+
+            window.location.href = 'https://www.cultura.com/checkout#panier';
+
+            window.setTimeout(() => {
+                if (getRetryState()) {
+                    startRetryLoop();
+                }
+            }, 900);
+        }
+
         function showModal() {
             createModalIfNeeded();
+            applyResponsiveLayout();
             if (modalState.overlay) {
                 modalState.overlay.style.display = 'flex';
             }
@@ -1476,6 +2064,9 @@
             if (modalState.categoryInput) {
                 modalState.categoryInput.value = catalogState.activeCategoryName || '';
             }
+            if (modalState.retryDelayInput) {
+                modalState.retryDelayInput.value = String(catalogState.retryDelayMs);
+            }
             if (modalState.editorPanel && modalState.editorToggleButton) {
                 modalState.editorPanel.style.display = catalogState.isEditorOpen ? 'flex' : 'none';
                 modalState.editorToggleButton.textContent = catalogState.isEditorOpen ? 'Fermer' : '+ Ajouter';
@@ -1490,21 +2081,147 @@
             }
         }
 
+        function applyResponsiveLayout() {
+            if (!modalState.container || !modalState.container.firstChild) return;
+
+            const isMobile = isMobileViewport();
+            state.isMobileLayout = isMobile;
+
+            const container = modalState.container;
+            const header = container.firstChild;
+            const body = header && header.nextSibling;
+            if (!body) return;
+
+            const colLeft = body.firstChild;
+            const colRight = colLeft && colLeft.nextSibling;
+            const formArea = colRight && colRight.lastChild;
+            const actionsRow = formArea && formArea.children && formArea.children[2];
+            const hint = actionsRow && actionsRow.firstChild;
+            const actionsRight = actionsRow && actionsRow.lastChild;
+            const prodHeader = colRight && colRight.children && colRight.children[1];
+            const categoryToggleButton = modalState.categoryToggleButton;
+
+            Object.assign(container.style, isMobile ? {
+                width: 'calc(100vw - 24px)',
+                maxHeight: 'calc(100vh - 24px)'
+            } : {
+                width: 'min(92vw, 760px)',
+                maxHeight: '84vh'
+            });
+
+            Object.assign(header.style, isMobile ? {
+                padding: '10px 12px'
+            } : {
+                padding: '12px 16px'
+            });
+
+            Object.assign(body.style, isMobile ? {
+                flexDirection: 'column',
+                gap: '12px',
+                padding: '12px',
+                overflow: 'auto'
+            } : {
+                flexDirection: 'row',
+                gap: '16px',
+                padding: '16px',
+                overflow: 'hidden'
+            });
+
+            if (colLeft) {
+                Object.assign(colLeft.style, isMobile ? {
+                    display: catalogState.isCategoryPanelOpen ? 'flex' : 'none',
+                    width: '100%',
+                    minWidth: '0',
+                    maxHeight: '180px'
+                } : {
+                    display: 'flex',
+                    width: '250px',
+                    minWidth: '250px',
+                    maxHeight: ''
+                });
+            }
+
+            if (colRight) {
+                Object.assign(colRight.style, isMobile ? {
+                    width: '100%',
+                    minWidth: '0',
+                    flex: 'unset',
+                    overflow: 'visible'
+                } : {
+                    width: '',
+                    minWidth: '',
+                    flex: '1',
+                    overflow: 'hidden'
+                });
+            }
+
+            if (formArea) {
+                Object.assign(formArea.style, isMobile ? {
+                    padding: '12px'
+                } : {
+                    padding: '14px'
+                });
+            }
+
+            if (actionsRow) {
+                Object.assign(actionsRow.style, isMobile ? {
+                    flexDirection: 'column',
+                    alignItems: 'stretch',
+                    gap: '10px'
+                } : {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: '8px'
+                });
+            }
+
+            if (hint) {
+                Object.assign(hint.style, isMobile ? {
+                    width: '100%'
+                } : {
+                    width: ''
+                });
+            }
+
+            if (actionsRight) {
+                Object.assign(actionsRight.style, isMobile ? {
+                    width: '100%',
+                    justifyContent: 'flex-start'
+                } : {
+                    width: '',
+                    justifyContent: 'flex-end'
+                });
+            }
+
+            if (prodHeader) {
+                Object.assign(prodHeader.style, isMobile ? {
+                    flexWrap: 'wrap'
+                } : {
+                    flexWrap: 'nowrap'
+                });
+            }
+
+            if (categoryToggleButton) {
+                categoryToggleButton.style.display = isMobile ? 'inline-block' : 'none';
+                categoryToggleButton.textContent = catalogState.isCategoryPanelOpen ? 'Masquer categories' : 'Categories';
+            }
+        }
+
         // =========================
         //   Bouton flottant principal
         // =========================
         function createButton() {
-            if (document.getElementById('sku-injector-btn')) return;
+            const container = createFabContainerIfNeeded();
+            if (document.getElementById('sku-injector-btn')) {
+                syncRetryControls();
+                return;
+            }
 
             const btn = document.createElement('button');
             btn.id = 'sku-injector-btn';
             btn.textContent = 'SKU Injector';
 
             Object.assign(btn.style, {
-                position: 'fixed',
-                bottom: '20px',
-                right: '20px',
-                zIndex: '99999',
                 padding: '10px 16px',
                 background: '#0066cc',
                 color: '#ffffff',
@@ -1532,13 +2249,45 @@
                 showModal();
             });
 
-            document.body.appendChild(btn);
+            container.appendChild(btn);
+            syncRetryControls();
+        }
+
+        function bootRetryIfNeeded() {
+            const retryState = getRetryState();
+            if (!retryState) {
+                syncRetryControls();
+                return;
+            }
+
+            syncRetryControls();
+            goToCartAndRunRetry();
         }
 
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', createButton);
+            document.addEventListener('DOMContentLoaded', () => {
+                createButton();
+                bootRetryIfNeeded();
+            });
         } else {
             createButton();
+            bootRetryIfNeeded();
         }
+
+        window.addEventListener('hashchange', () => {
+            if (getRetryState()) {
+                createButton();
+                startRetryLoop();
+            } else {
+                createButton();
+                syncRetryControls();
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            applyResponsiveLayout();
+            applyFabResponsiveLayout();
+            syncRetryControls();
+        });
     });
 })();
