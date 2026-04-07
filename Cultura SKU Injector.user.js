@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cultura SKU Injector
 // @namespace    http://tampermonkey.net/
-// @version      2
+// @version      3
 // @description  Ajoute un produit Cultura via son SKU
 // @match        https://www.cultura.com/*
 // @run-at       document-start
@@ -9,6 +9,7 @@
 // @updateURL    https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/Cultura%20SKU%20Injector.user.js
 // @downloadURL  https://raw.githubusercontent.com/Groshaq/GroshaqScript/main/Cultura%20SKU%20Injector.user.js
 // ==/UserScript==
+
 
 (function () {
     'use strict';
@@ -22,13 +23,24 @@
 
     inject(function pageContext() {
 
-        const TAMPON_SKU = '12440268'; // ton produit “technique” éventuellement utile plus tard
+        const TEMPLATE_STORAGE_KEY = 'culturaSkuInjectorTemplate';
+        const CUSTOM_CATEGORIES_STORAGE_KEY = 'culturaSkuInjectorCustomCategories';
+        const CATEGORY_ORDER_STORAGE_KEY = 'culturaSkuInjectorCategoryOrder';
+        const PRODUCT_ORDER_STORAGE_KEY = 'culturaSkuInjectorProductOrder';
 
         const state = {
             url: null,
             init: null,
             storedUrl: null,
             storedInit: null
+        };
+
+        const catalogState = {
+            customCategories: [],
+            activeCategoryName: null,
+            isEditorOpen: false,
+            categoryOrder: [],
+            productOrder: {}
         };
 
         function cloneHeaders(headers) {
@@ -54,7 +66,7 @@
         // 🔹 Chargement d'un template sauvegardé (si on en a déjà un dans localStorage)
         (function loadStoredTemplate() {
             try {
-                const raw = localStorage.getItem('culturaSkuInjectorTemplate');
+                const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
                 if (!raw) return;
                 const parsed = JSON.parse(raw);
 
@@ -71,6 +83,244 @@
                 console.warn('[SKU Injector] Impossible de charger le template localStorage', e);
             }
         })();
+
+        (function loadStoredCategories() {
+            try {
+                const raw = localStorage.getItem(CUSTOM_CATEGORIES_STORAGE_KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                    catalogState.customCategories = parsed
+                        .filter(cat => cat && typeof cat.name === 'string' && Array.isArray(cat.products))
+                        .map(cat => ({
+                            name: cat.name.trim(),
+                            products: cat.products
+                                .filter(prod => prod && typeof prod.label === 'string' && typeof prod.sku === 'string')
+                                .map(prod => ({
+                                    label: prod.label.trim(),
+                                    sku: prod.sku.trim()
+                                }))
+                                .filter(prod => prod.label && prod.sku)
+                        }))
+                        .filter(cat => cat.name);
+                }
+            } catch (e) {
+                console.warn('[SKU Injector] Impossible de charger les catégories personnalisées', e);
+            }
+        })();
+
+        (function loadStoredOrdering() {
+            try {
+                const rawCategoryOrder = localStorage.getItem(CATEGORY_ORDER_STORAGE_KEY);
+                const parsedCategoryOrder = rawCategoryOrder ? JSON.parse(rawCategoryOrder) : [];
+                if (Array.isArray(parsedCategoryOrder)) {
+                    catalogState.categoryOrder = parsedCategoryOrder.filter(name => typeof name === 'string' && name.trim());
+                }
+            } catch (e) {
+                console.warn('[SKU Injector] Impossible de charger l’ordre des catégories', e);
+            }
+
+            try {
+                const rawProductOrder = localStorage.getItem(PRODUCT_ORDER_STORAGE_KEY);
+                const parsedProductOrder = rawProductOrder ? JSON.parse(rawProductOrder) : {};
+                if (parsedProductOrder && typeof parsedProductOrder === 'object') {
+                    catalogState.productOrder = Object.keys(parsedProductOrder).reduce((acc, key) => {
+                        const value = parsedProductOrder[key];
+                        if (Array.isArray(value)) {
+                            acc[key] = value.filter(id => typeof id === 'string' && id.trim());
+                        }
+                        return acc;
+                    }, {});
+                }
+            } catch (e) {
+                console.warn('[SKU Injector] Impossible de charger l’ordre des produits', e);
+            }
+        })();
+
+        function saveCategoryOrder() {
+            localStorage.setItem(CATEGORY_ORDER_STORAGE_KEY, JSON.stringify(catalogState.categoryOrder));
+        }
+
+        function saveProductOrder() {
+            localStorage.setItem(PRODUCT_ORDER_STORAGE_KEY, JSON.stringify(catalogState.productOrder));
+        }
+
+        function productId(product) {
+            return product.sku + '::' + product.label;
+        }
+
+        function ensureCategoryOrder(categories) {
+            const names = categories.map(cat => cat.name);
+            const known = catalogState.categoryOrder.filter(name => names.includes(name));
+            const missing = names.filter(name => !known.includes(name));
+            const next = known.concat(missing);
+
+            if (next.length !== catalogState.categoryOrder.length || next.some((name, index) => catalogState.categoryOrder[index] !== name)) {
+                catalogState.categoryOrder = next;
+                saveCategoryOrder();
+            }
+
+            return next;
+        }
+
+        function ensureProductOrderForCategory(category) {
+            const ids = category.products.map(productId);
+            const current = Array.isArray(catalogState.productOrder[category.name]) ? catalogState.productOrder[category.name] : [];
+            const known = current.filter(id => ids.includes(id));
+            const missing = ids.filter(id => !known.includes(id));
+            const next = known.concat(missing);
+
+            if (next.length !== current.length || next.some((id, index) => current[index] !== id)) {
+                catalogState.productOrder[category.name] = next;
+                saveProductOrder();
+            }
+
+            return next;
+        }
+
+        function moveInArray(items, fromIndex, toIndex) {
+            if (fromIndex < 0 || toIndex < 0 || fromIndex >= items.length || toIndex >= items.length) {
+                return items.slice();
+            }
+
+            const next = items.slice();
+            const [moved] = next.splice(fromIndex, 1);
+            next.splice(toIndex, 0, moved);
+            return next;
+        }
+
+        function moveCategory(categoryName, direction) {
+            const categories = getAllCategories();
+            const order = ensureCategoryOrder(categories);
+            const index = order.indexOf(categoryName);
+            const targetIndex = direction === 'up' ? index - 1 : index + 1;
+            if (index === -1 || targetIndex < 0 || targetIndex >= order.length) return;
+
+            catalogState.categoryOrder = moveInArray(order, index, targetIndex);
+            saveCategoryOrder();
+        }
+
+        function moveProduct(categoryName, product, direction) {
+            const categories = getAllCategories();
+            const category = categories.find(cat => cat.name === categoryName);
+            if (!category) return;
+
+            const order = ensureProductOrderForCategory(category);
+            const id = productId(product);
+            const index = order.indexOf(id);
+            const targetIndex = direction === 'up' ? index - 1 : index + 1;
+            if (index === -1 || targetIndex < 0 || targetIndex >= order.length) return;
+
+            catalogState.productOrder[categoryName] = moveInArray(order, index, targetIndex);
+            saveProductOrder();
+        }
+
+        function getAllCategories() {
+            const merged = DEFAULT_SKU_CATEGORIES.map(cat => ({
+                name: cat.name,
+                products: cat.products.map(prod => ({
+                    label: prod.label,
+                    sku: prod.sku
+                }))
+            }));
+
+            catalogState.customCategories.forEach(customCat => {
+                const existing = merged.find(cat => cat.name.toLowerCase() === customCat.name.toLowerCase());
+                if (!existing) {
+                    merged.push({
+                        name: customCat.name,
+                        products: customCat.products.map(prod => ({
+                            label: prod.label,
+                            sku: prod.sku
+                        }))
+                    });
+                    return;
+                }
+
+                customCat.products.forEach(customProd => {
+                    const existingProduct = existing.products.find(
+                        prod => prod.sku === customProd.sku || prod.label.toLowerCase() === customProd.label.toLowerCase()
+                    );
+
+                    if (existingProduct) {
+                        existingProduct.label = customProd.label;
+                        existingProduct.sku = customProd.sku;
+                    } else {
+                        existing.products.push({
+                            label: customProd.label,
+                            sku: customProd.sku
+                        });
+                    }
+                });
+            });
+
+            const categoryOrder = ensureCategoryOrder(merged);
+            const orderedCategories = categoryOrder
+                .map(name => merged.find(cat => cat.name === name))
+                .filter(Boolean);
+
+            orderedCategories.forEach(category => {
+                const productOrder = ensureProductOrderForCategory(category);
+                category.products = productOrder
+                    .map(id => category.products.find(prod => productId(prod) === id))
+                    .filter(Boolean);
+            });
+
+            return orderedCategories;
+        }
+
+        function saveCustomCategories() {
+            localStorage.setItem(
+                CUSTOM_CATEGORIES_STORAGE_KEY,
+                JSON.stringify(catalogState.customCategories)
+            );
+        }
+
+        function addCustomProduct(categoryName, label, sku) {
+            const cleanCategoryName = categoryName.trim();
+            const cleanLabel = label.trim();
+            const cleanSku = sku.trim();
+
+            if (!cleanCategoryName || !cleanLabel || !cleanSku) {
+                throw new Error('Merci de renseigner une catégorie, un article et un SKU.');
+            }
+
+            const existingCategory = catalogState.customCategories.find(
+                cat => cat.name.toLowerCase() === cleanCategoryName.toLowerCase()
+            );
+
+            if (existingCategory) {
+                const existingProduct = existingCategory.products.find(
+                    prod => prod.sku === cleanSku || prod.label.toLowerCase() === cleanLabel.toLowerCase()
+                );
+                if (existingProduct) {
+                    existingProduct.label = cleanLabel;
+                    existingProduct.sku = cleanSku;
+                } else {
+                    existingCategory.products.push({
+                        label: cleanLabel,
+                        sku: cleanSku
+                    });
+                }
+            } else {
+                catalogState.customCategories.push({
+                    name: cleanCategoryName,
+                    products: [
+                        {
+                            label: cleanLabel,
+                            sku: cleanSku
+                        }
+                    ]
+                });
+            }
+
+            saveCustomCategories();
+
+            return {
+                categoryName: cleanCategoryName,
+                wasDefaultCategory: false
+            };
+        }
 
         const originalFetch = window.fetch;
         window.fetch = function (input, init) {
@@ -96,7 +346,7 @@
                     // 🔹 On sauvegarde un template réutilisable dans localStorage
                     try {
                         localStorage.setItem(
-                            'culturaSkuInjectorTemplate',
+                            TEMPLATE_STORAGE_KEY,
                             JSON.stringify({
                                 url,
                                 init: {
@@ -122,13 +372,12 @@
             const cleanSku = sku.trim();
             if (!cleanSku) return;
 
-            // 🔹 IDENTIQUE à ton script : live d'abord, sinon template stocké
             const baseUrl = state.url || state.storedUrl;
             const baseInit = state.init || state.storedInit;
 
             if (!baseUrl || !baseInit) {
                 throw new Error(
-                    'Ajoute un article au panier à la main sur le site Cultura, puis reclique sur "SKU Injector".'
+                    'Ajoute d’abord un article au panier manuellement sur Cultura, puis relance le script.'
                 );
             }
 
@@ -159,7 +408,6 @@
                 body: JSON.stringify(payload)
             };
 
-            // Tag optionnel
             if (newInit.headers instanceof Headers) {
                 newInit.headers.set('x-sku-injector', '1');
             } else if (Array.isArray(newInit.headers)) {
@@ -188,7 +436,30 @@
         // =========================
         //   Données catégories / produits
         // =========================
-        const SKU_CATEGORIES = [
+        const DEFAULT_SKU_CATEGORIES = [
+            {
+                name: '30 ans',
+                products: [
+                    { label: 'Collection illustration premiers partenaires Pokémon - Série 1', sku: '12768537' },
+                    { label: 'Coffret Journée Pokémon Day 26', sku: '12768532' }
+                ]
+            },
+            {
+                name: 'ME3 Equilibre parfait',
+                products: [
+                    { label: 'Booster', sku: '12768545' },
+                    { label: 'Tripack', sku: '12768533' },
+                    { label: 'ETB', sku: '12768539' },
+                    { label: 'Bundle', sku: '12768536' }
+                ]
+            },
+            {
+                name: 'ME2.5 Héros transcendants',
+                products: [
+                    { label: "Pin's Deluxe", sku: '12768535' },
+                    { label: 'Collection poster', sku: '12768540' }
+                ]
+            },
             {
                 name: 'ME2 Flammes Fantasmagoriques',
                 products: [
@@ -203,7 +474,22 @@
                 products: [
                     { label: 'Mini Tins', sku: '12369064' },
                     { label: 'Tripack', sku: '12369060' },
-                    { label: 'Booster', sku: '12369059' }
+                    { label: 'Booster', sku: '12369059' },
+                    { label: 'ETB', sku: '11987409' }
+                ]
+            },
+            {
+                name: 'EV10.5',
+                products: [
+                    { label: 'Bundle Foudre Noire', sku: '11987412' },
+                    { label: 'ETB Flamme Blanche', sku: '11987401' },
+                    { label: 'ETB Foudre Noire', sku: '11987402' }
+                ]
+            },
+            {
+                name: 'EV10 Rivalités Destinées',
+                products: [
+                    { label: 'ETB', sku: '11903647' }
                 ]
             },
             {
@@ -213,9 +499,21 @@
                 ]
             },
             {
+                name: 'EV8 Étincelles Déferlantes',
+                products: [
+                    { label: 'Booster', sku: '12435442' }
+                ]
+            },
+            {
                 name: 'ARTICLE TEST',
                 products: [
                     { label: 'Calendrier de l’Avent en bois - Sapin tradition - Créalia', sku: '11896492' }
+                ]
+            },
+            {
+                name: 'Autres',
+                products: [
+                    { label: 'Booster Origine Perdue', sku: '12435444' }
                 ]
             }
         ];
@@ -230,7 +528,14 @@
             addButton: null,
             errorBox: null,
             categoryList: null,
-            productList: null
+            productList: null,
+            categoryInput: null,
+            itemLabelInput: null,
+            itemSkuInput: null,
+            saveItemButton: null,
+            saveItemMessage: null,
+            editorPanel: null,
+            editorToggleButton: null
         };
 
         // =========================
@@ -359,7 +664,6 @@
         function createModalIfNeeded() {
             if (modalState.overlay) return;
 
-            // Overlay
             const overlay = document.createElement('div');
             overlay.id = 'sku-injector-overlay';
             Object.assign(overlay.style, {
@@ -373,29 +677,46 @@
                 fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
             });
 
-            // Container
             const container = document.createElement('div');
             Object.assign(container.style, {
                 background: '#ffffff',
-                borderRadius: '10px',
+                borderRadius: '14px',
                 boxShadow: '0 12px 40px rgba(0, 0, 0, 0.25)',
-                width: 'min(90vw, 640px)',
-                maxHeight: '80vh',
+                width: 'min(92vw, 760px)',
+                maxHeight: '84vh',
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden'
             });
 
-            // Header (bandeau BLEU)
             const header = document.createElement('div');
             Object.assign(header.style, {
-                padding: '12px 20px',
-                borderBottom: 'none',
+                padding: '12px 16px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 background: '#0066cc',
                 color: '#ffffff'
+            });
+
+            const headerLeft = document.createElement('div');
+            Object.assign(headerLeft.style, {
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px'
+            });
+
+            const editorToggleButton = document.createElement('button');
+            editorToggleButton.type = 'button';
+            Object.assign(editorToggleButton.style, {
+                border: '1px solid rgba(255,255,255,0.45)',
+                background: 'rgba(255,255,255,0.14)',
+                color: '#ffffff',
+                fontSize: '12px',
+                fontWeight: '600',
+                padding: '7px 12px',
+                borderRadius: '999px',
+                cursor: 'pointer'
             });
 
             const title = document.createElement('div');
@@ -430,99 +751,143 @@
                 if (e.target === overlay) hideModal();
             });
 
-            header.appendChild(title);
+            headerLeft.appendChild(editorToggleButton);
+            headerLeft.appendChild(title);
+            header.appendChild(headerLeft);
             header.appendChild(closeBtn);
 
-            // Body
             const body = document.createElement('div');
             Object.assign(body.style, {
                 display: 'flex',
                 gap: '16px',
-                padding: '16px 20px',
+                padding: '16px',
                 flex: '1',
                 overflow: 'hidden',
                 background: '#f9fafb'
             });
 
-            // Colonne catégories
             const colLeft = document.createElement('div');
             Object.assign(colLeft.style, {
-                width: '38%',
-                borderRight: '1px solid #e5e7eb',
-                paddingRight: '12px',
-                paddingLeft: '8px',
+                width: '250px',
+                minWidth: '250px',
                 display: 'flex',
                 flexDirection: 'column',
                 background: '#ffffff',
-                borderRadius: '8px',
-                boxShadow: '0 0 0 1px rgba(0,0,0,0.02)'
+                borderRadius: '12px',
+                boxShadow: '0 0 0 1px rgba(15,23,42,0.06)',
+                overflow: 'hidden'
+            });
+
+            const catHeader = document.createElement('div');
+            Object.assign(catHeader.style, {
+                padding: '14px 14px 10px',
+                borderBottom: '1px solid #eef2f7',
+                background: '#f8fafc'
             });
 
             const catTitle = document.createElement('div');
-            catTitle.textContent = 'CATÉGORIES';
+            catTitle.textContent = 'Categories';
             Object.assign(catTitle.style, {
-                fontSize: '13px',
-                fontWeight: '600',
-                margin: '10px 10px 6px',
+                fontSize: '12px',
+                fontWeight: '700',
                 textTransform: 'uppercase',
-                letterSpacing: '0.04em',
-                color: '#555'
+                letterSpacing: '0.08em',
+                color: '#64748b'
             });
 
             const catList = document.createElement('div');
             Object.assign(catList.style, {
                 overflowY: 'auto',
-                padding: '0 6px 10px'
+                padding: '10px',
+                flex: '1'
             });
 
-            colLeft.appendChild(catTitle);
+            catHeader.appendChild(catTitle);
+            colLeft.appendChild(catHeader);
             colLeft.appendChild(catList);
 
-            // Colonne produits + saisie
             const colRight = document.createElement('div');
             Object.assign(colRight.style, {
-                width: '62%',
+                flex: '1',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '8px',
+                gap: '12px',
                 background: '#ffffff',
-                borderRadius: '8px',
-                padding: '10px 12px',
-                boxShadow: '0 0 0 1px rgba(0,0,0,0.02)'
+                borderRadius: '12px',
+                padding: '14px',
+                boxShadow: '0 0 0 1px rgba(15,23,42,0.06)',
+                overflow: 'hidden'
+            });
+
+            const editorPanel = document.createElement('div');
+            Object.assign(editorPanel.style, {
+                display: 'none',
+                flexDirection: 'column',
+                gap: '8px',
+                padding: '14px',
+                borderRadius: '10px',
+                border: '1px solid #dbeafe',
+                background: '#f8fbff'
+            });
+
+            const prodHeader = document.createElement('div');
+            Object.assign(prodHeader.style, {
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px'
+            });
+
+            const prodHeaderText = document.createElement('div');
+            Object.assign(prodHeaderText.style, {
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '2px'
             });
 
             const prodTitle = document.createElement('div');
-            prodTitle.textContent = 'PRODUITS';
+            prodTitle.textContent = 'Produits enregistres';
             Object.assign(prodTitle.style, {
-                fontSize: '13px',
-                fontWeight: '600',
-                marginBottom: '4px',
-                textTransform: 'uppercase',
-                letterSpacing: '0.04em',
-                color: '#555'
+                fontSize: '15px',
+                fontWeight: '700',
+                color: '#111827'
             });
+
+            const prodSubtitle = document.createElement('div');
+            prodSubtitle.textContent = 'Clique sur un article pour remplir automatiquement le SKU.';
+            Object.assign(prodSubtitle.style, {
+                fontSize: '12px',
+                color: '#6b7280'
+            });
+
+            prodHeaderText.appendChild(prodTitle);
+            prodHeaderText.appendChild(prodSubtitle);
+            prodHeader.appendChild(prodHeaderText);
 
             const prodList = document.createElement('div');
             Object.assign(prodList.style, {
                 flex: '1',
                 overflowY: 'auto',
-                borderRadius: '6px',
-                border: '1px solid #f0f0f0',
-                padding: '6px',
-                background: '#f9fafb'
+                borderRadius: '10px',
+                border: '1px solid #e5e7eb',
+                padding: '8px',
+                background: '#f8fafc',
+                minHeight: '220px'
             });
 
-            // Zone saisie / actions
             const formArea = document.createElement('div');
             Object.assign(formArea.style, {
-                marginTop: '8px',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '6px'
+                gap: '8px',
+                padding: '14px',
+                borderRadius: '10px',
+                border: '1px solid #e5e7eb',
+                background: '#ffffff'
             });
 
             const skuLabel = document.createElement('label');
-            skuLabel.textContent = 'SKU à ajouter au panier';
+            skuLabel.textContent = 'SKU a ajouter au panier';
             Object.assign(skuLabel.style, {
                 fontSize: '13px',
                 fontWeight: '500'
@@ -534,11 +899,15 @@
             Object.assign(skuInput.style, {
                 width: '100%',
                 padding: '8px 10px',
+                height: '38px',
+                minHeight: '38px',
+                lineHeight: '20px',
                 borderRadius: '6px',
                 border: '1px solid #d1d5db',
                 fontSize: '13px',
                 outline: 'none',
-                background: '#f9fafb'
+                background: '#ffffff',
+                boxSizing: 'border-box'
             });
             skuInput.addEventListener('focus', () => {
                 skuInput.style.borderColor = '#2563eb';
@@ -557,14 +926,16 @@
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 gap: '8px',
-                marginTop: '4px'
+                marginTop: '2px'
             });
 
             const hint = document.createElement('div');
             hint.textContent = 'Clique sur un produit pour remplir le SKU, ou saisis-le manuellement.';
             Object.assign(hint.style, {
                 fontSize: '11px',
-                color: '#6b7280'
+                color: '#6b7280',
+                lineHeight: '1.4',
+                flex: '1'
             });
 
             const addButton = document.createElement('button');
@@ -600,6 +971,120 @@
                 minHeight: '14px'
             });
 
+            const saveBox = document.createElement('div');
+            Object.assign(saveBox.style, {
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px'
+            });
+
+            const saveTitle = document.createElement('div');
+            saveTitle.textContent = 'Ajouter une categorie / un article';
+            Object.assign(saveTitle.style, {
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#111827'
+            });
+
+            const saveHint = document.createElement('div');
+            saveHint.textContent = 'Choisis une categorie existante ou tape un nouveau nom.';
+            Object.assign(saveHint.style, {
+                fontSize: '11px',
+                color: '#6b7280',
+                lineHeight: '1.4'
+            });
+
+            const categoryInput = document.createElement('input');
+            categoryInput.type = 'text';
+            categoryInput.placeholder = 'Catégorie existante ou nouvelle';
+            Object.assign(categoryInput.style, {
+                width: '100%',
+                padding: '8px 10px',
+                height: '38px',
+                minHeight: '38px',
+                lineHeight: '20px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '13px',
+                background: '#ffffff',
+                boxSizing: 'border-box'
+            });
+
+            const itemLabelInput = document.createElement('input');
+            itemLabelInput.type = 'text';
+            itemLabelInput.placeholder = "Nom de l'article";
+            Object.assign(itemLabelInput.style, {
+                width: '100%',
+                padding: '8px 10px',
+                height: '38px',
+                minHeight: '38px',
+                lineHeight: '20px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '13px',
+                background: '#ffffff',
+                boxSizing: 'border-box'
+            });
+
+            const itemSkuInput = document.createElement('input');
+            itemSkuInput.type = 'text';
+            itemSkuInput.placeholder = 'SKU de l’article';
+            Object.assign(itemSkuInput.style, {
+                width: '100%',
+                padding: '8px 10px',
+                height: '38px',
+                minHeight: '38px',
+                lineHeight: '20px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '13px',
+                background: '#ffffff',
+                boxSizing: 'border-box'
+            });
+
+            const saveItemRow = document.createElement('div');
+            Object.assign(saveItemRow.style, {
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px'
+            });
+
+            const saveItemButton = document.createElement('button');
+            saveItemButton.type = 'button';
+            saveItemButton.textContent = 'Enregistrer';
+            Object.assign(saveItemButton.style, {
+                whiteSpace: 'nowrap',
+                padding: '8px 12px',
+                background: '#0f766e',
+                color: '#ffffff',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: '500'
+            });
+
+            const saveItemMessage = document.createElement('div');
+            Object.assign(saveItemMessage.style, {
+                fontSize: '11px',
+                minHeight: '14px',
+                color: '#065f46',
+                flex: '1'
+            });
+
+            saveItemRow.appendChild(saveItemMessage);
+            saveItemRow.appendChild(saveItemButton);
+
+            saveBox.appendChild(saveTitle);
+            saveBox.appendChild(saveHint);
+            saveBox.appendChild(categoryInput);
+            saveBox.appendChild(itemLabelInput);
+            saveBox.appendChild(itemSkuInput);
+            saveBox.appendChild(saveItemRow);
+
+            editorPanel.appendChild(saveBox);
+
             actionsRow.appendChild(hint);
             actionsRow.appendChild(addButton);
 
@@ -608,7 +1093,8 @@
             formArea.appendChild(actionsRow);
             formArea.appendChild(errorBox);
 
-            colRight.appendChild(prodTitle);
+            colRight.appendChild(editorPanel);
+            colRight.appendChild(prodHeader);
             colRight.appendChild(prodList);
             colRight.appendChild(formArea);
 
@@ -628,9 +1114,17 @@
             modalState.errorBox = errorBox;
             modalState.categoryList = catList;
             modalState.productList = prodList;
+            modalState.categoryInput = categoryInput;
+            modalState.itemLabelInput = itemLabelInput;
+            modalState.itemSkuInput = itemSkuInput;
+            modalState.saveItemButton = saveItemButton;
+            modalState.saveItemMessage = saveItemMessage;
+            modalState.editorPanel = editorPanel;
+            modalState.editorToggleButton = editorToggleButton;
 
             setupCategoriesUI();
             setupAddButtonLogic();
+            setupCatalogFormLogic();
         }
 
         function setupCategoriesUI() {
@@ -641,51 +1135,121 @@
             catList.innerHTML = '';
             prodList.innerHTML = '';
 
-            let activeCategoryIndex = 0;
+            const categories = getAllCategories();
+            if (!categories.length) return;
+
+            if (
+                !catalogState.activeCategoryName ||
+                !categories.some(cat => cat.name === catalogState.activeCategoryName)
+            ) {
+                catalogState.activeCategoryName = categories[0].name;
+            }
 
             function renderCategories() {
                 catList.innerHTML = '';
-                SKU_CATEGORIES.forEach((cat, index) => {
+                const orderedCategories = getAllCategories();
+                orderedCategories.forEach((cat, index) => {
+                    const isActive = cat.name === catalogState.activeCategoryName;
                     const item = document.createElement('div');
-                    item.textContent = cat.name;
                     Object.assign(item.style, {
-                        padding: '6px 10px',
-                        marginBottom: '4px',
-                        borderRadius: '6px',
+                        padding: '10px 12px',
+                        marginBottom: '6px',
+                        borderRadius: '10px',
                         fontSize: '13px',
-                        cursor: 'pointer',
-                        border: index === activeCategoryIndex ? '1px solid #2563eb' : '1px solid transparent',
-                        background: index === activeCategoryIndex ? 'rgba(37,99,235,0.08)' : 'transparent',
-                        color: index === activeCategoryIndex ? '#1d4ed8' : '#111827'
+                        lineHeight: '1.35',
+                        wordBreak: 'break-word',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        border: isActive ? '1px solid #2563eb' : '1px solid transparent',
+                        background: isActive ? 'rgba(37,99,235,0.10)' : '#ffffff',
+                        color: isActive ? '#1d4ed8' : '#111827'
                     });
-                    item.addEventListener('click', () => {
-                        activeCategoryIndex = index;
+
+                    const label = document.createElement('button');
+                    label.type = 'button';
+                    label.textContent = cat.name;
+                    Object.assign(label.style, {
+                        border: 'none',
+                        background: 'transparent',
+                        padding: '0',
+                        margin: '0',
+                        fontSize: '13px',
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        color: 'inherit',
+                        flex: '1',
+                        lineHeight: '1.35'
+                    });
+
+                    label.addEventListener('click', () => {
+                        catalogState.activeCategoryName = cat.name;
+                        if (modalState.categoryInput) {
+                            modalState.categoryInput.value = cat.name;
+                        }
                         renderCategories();
                         renderProducts();
                     });
+
+                    const controls = document.createElement('div');
+                    Object.assign(controls.style, {
+                        display: 'flex',
+                        gap: '4px',
+                        flexShrink: '0'
+                    });
+
+                    function createMoveButton(symbol, disabled, direction) {
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.textContent = symbol;
+                        btn.disabled = disabled;
+                        Object.assign(btn.style, {
+                            width: '24px',
+                            height: '24px',
+                            borderRadius: '6px',
+                            border: '1px solid #d1d5db',
+                            background: disabled ? '#f8fafc' : '#ffffff',
+                            color: disabled ? '#cbd5e1' : '#475569',
+                            cursor: disabled ? 'default' : 'pointer',
+                            fontSize: '12px',
+                            lineHeight: '1'
+                        });
+                        btn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            if (disabled) return;
+                            moveCategory(cat.name, direction);
+                            setupCategoriesUI();
+                        });
+                        return btn;
+                    }
+
+                    controls.appendChild(createMoveButton('↑', index === 0, 'up'));
+                    controls.appendChild(createMoveButton('↓', index === orderedCategories.length - 1, 'down'));
+
+                    item.appendChild(label);
+                    item.appendChild(controls);
                     catList.appendChild(item);
                 });
             }
 
             function renderProducts() {
                 prodList.innerHTML = '';
-                const cat = SKU_CATEGORIES[activeCategoryIndex];
+                const cat = getAllCategories().find(category => category.name === catalogState.activeCategoryName);
                 if (!cat) return;
 
-                cat.products.forEach(prod => {
-                    const row = document.createElement('button');
-                    row.type = 'button';
+                cat.products.forEach((prod, index) => {
+                    const row = document.createElement('div');
                     Object.assign(row.style, {
                         width: '100%',
-                        textAlign: 'left',
                         display: 'flex',
-                        flexDirection: 'column',
-                        padding: '6px 8px',
-                        marginBottom: '4px',
-                        borderRadius: '6px',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '10px',
+                        padding: '10px 12px',
+                        marginBottom: '6px',
+                        borderRadius: '10px',
                         border: '1px solid #e5e7eb',
                         background: '#ffffff',
-                        cursor: 'pointer',
                         fontSize: '12px',
                         boxShadow: '0 1px 2px rgba(15,23,42,0.05)'
                     });
@@ -699,11 +1263,26 @@
                         row.style.background = '#ffffff';
                     });
 
+                    const infoButton = document.createElement('button');
+                    infoButton.type = 'button';
+                    Object.assign(infoButton.style, {
+                        border: 'none',
+                        background: 'transparent',
+                        padding: '0',
+                        margin: '0',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        flex: '1',
+                        display: 'flex',
+                        flexDirection: 'column'
+                    });
+
                     const line1 = document.createElement('div');
                     line1.textContent = prod.label;
                     Object.assign(line1.style, {
-                        fontWeight: '500',
-                        marginBottom: '2px'
+                        fontWeight: '600',
+                        marginBottom: '4px',
+                        color: '#0f172a'
                     });
 
                     const line2 = document.createElement('div');
@@ -714,10 +1293,10 @@
                         fontSize: '11px'
                     });
 
-                    row.appendChild(line1);
-                    row.appendChild(line2);
+                    infoButton.appendChild(line1);
+                    infoButton.appendChild(line2);
 
-                    row.addEventListener('click', () => {
+                    infoButton.addEventListener('click', () => {
                         if (modalState.skuInput) {
                             modalState.skuInput.value = prod.sku;
                             modalState.skuInput.focus();
@@ -725,12 +1304,111 @@
                         }
                     });
 
+                    const controls = document.createElement('div');
+                    Object.assign(controls.style, {
+                        display: 'flex',
+                        gap: '4px',
+                        flexShrink: '0'
+                    });
+
+                    function createMoveButton(symbol, disabled, direction) {
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.textContent = symbol;
+                        btn.disabled = disabled;
+                        Object.assign(btn.style, {
+                            width: '24px',
+                            height: '24px',
+                            borderRadius: '6px',
+                            border: '1px solid #d1d5db',
+                            background: disabled ? '#f8fafc' : '#ffffff',
+                            color: disabled ? '#cbd5e1' : '#475569',
+                            cursor: disabled ? 'default' : 'pointer',
+                            fontSize: '12px',
+                            lineHeight: '1'
+                        });
+                        btn.addEventListener('click', () => {
+                            if (disabled) return;
+                            moveProduct(cat.name, prod, direction);
+                            setupCategoriesUI();
+                        });
+                        return btn;
+                    }
+
+                    controls.appendChild(createMoveButton('↑', index === 0, 'up'));
+                    controls.appendChild(createMoveButton('↓', index === cat.products.length - 1, 'down'));
+
+                    row.appendChild(infoButton);
+                    row.appendChild(controls);
+
                     prodList.appendChild(row);
                 });
             }
 
             renderCategories();
             renderProducts();
+        }
+
+        function setupCatalogFormLogic() {
+            const categoryInput = modalState.categoryInput;
+            const itemLabelInput = modalState.itemLabelInput;
+            const itemSkuInput = modalState.itemSkuInput;
+            const saveItemButton = modalState.saveItemButton;
+            const saveItemMessage = modalState.saveItemMessage;
+            const editorPanel = modalState.editorPanel;
+            const editorToggleButton = modalState.editorToggleButton;
+
+            if (!categoryInput || !itemLabelInput || !itemSkuInput || !saveItemButton || !saveItemMessage || !editorPanel || !editorToggleButton) {
+                return;
+            }
+
+            function syncEditorVisibility() {
+                editorPanel.style.display = catalogState.isEditorOpen ? 'flex' : 'none';
+                editorToggleButton.textContent = catalogState.isEditorOpen ? 'Fermer' : '+ Ajouter';
+                editorToggleButton.style.background = catalogState.isEditorOpen ? '#ffffff' : 'rgba(255,255,255,0.14)';
+                editorToggleButton.style.color = catalogState.isEditorOpen ? '#0f4ea8' : '#ffffff';
+            }
+
+            function setSaveMessage(message, isError) {
+                saveItemMessage.textContent = message;
+                saveItemMessage.style.color = isError ? '#b91c1c' : '#065f46';
+            }
+
+            editorToggleButton.addEventListener('click', () => {
+                catalogState.isEditorOpen = !catalogState.isEditorOpen;
+                syncEditorVisibility();
+                if (catalogState.isEditorOpen) {
+                    categoryInput.focus();
+                    categoryInput.select();
+                }
+            });
+
+            saveItemButton.addEventListener('click', () => {
+                try {
+                    const result = addCustomProduct(
+                        categoryInput.value,
+                        itemLabelInput.value,
+                        itemSkuInput.value
+                    );
+
+                    catalogState.activeCategoryName = result.categoryName;
+                    setupCategoriesUI();
+
+                    if (modalState.skuInput) {
+                        modalState.skuInput.value = itemSkuInput.value.trim();
+                    }
+
+                    itemLabelInput.value = '';
+                    itemSkuInput.value = '';
+                    catalogState.isEditorOpen = false;
+                    syncEditorVisibility();
+                    setSaveMessage('Article enregistré dans "' + result.categoryName + '".', false);
+                } catch (e) {
+                    setSaveMessage((e && e.message) || 'Impossible d’enregistrer cet article.', true);
+                }
+            });
+
+            syncEditorVisibility();
         }
 
         function setupAddButtonLogic() {
@@ -792,6 +1470,18 @@
             if (modalState.errorBox) {
                 modalState.errorBox.textContent = '';
             }
+            if (modalState.saveItemMessage) {
+                modalState.saveItemMessage.textContent = '';
+            }
+            if (modalState.categoryInput) {
+                modalState.categoryInput.value = catalogState.activeCategoryName || '';
+            }
+            if (modalState.editorPanel && modalState.editorToggleButton) {
+                modalState.editorPanel.style.display = catalogState.isEditorOpen ? 'flex' : 'none';
+                modalState.editorToggleButton.textContent = catalogState.isEditorOpen ? 'Fermer' : '+ Ajouter';
+                modalState.editorToggleButton.style.background = catalogState.isEditorOpen ? '#ffffff' : 'rgba(255,255,255,0.14)';
+                modalState.editorToggleButton.style.color = catalogState.isEditorOpen ? '#0f4ea8' : '#ffffff';
+            }
         }
 
         function hideModal() {
@@ -832,16 +1522,10 @@
             btn.addEventListener('click', () => {
                 const hasTemplate = !!(state.url || state.storedUrl) && !!(state.init || state.storedInit);
                 if (!hasTemplate) {
-                showInfoModal(
-    "Aucun panier de référence détecté.<br><br>" +
-    "<strong>Étapes nécessaires :</strong><br><br>" +
-    "1️⃣ Ajoute d’abord un article au panier <strong>à la main</strong> sur le site Cultura.<br>" +
-    "&nbsp;&nbsp;&nbsp;&nbsp;→ Utilise le bouton « Ajouter au panier » sur n’importe quel produit.<br><br>" +
-    "2️⃣ Reviens ensuite cliquer sur « SKU Injector » pour débloquer l’outil.<br><br>" +
-    "ℹ️ Astuce : n’importe quel article fonctionne, il sert juste à initialiser le panier."
-);
-
-
+                    showInfoModal(
+                        "Ajoute d'abord un article au panier manuellement sur Cultura pour initialiser la session.<br><br>" +
+                        "Une fois cet article ajouté, reclique sur <strong>SKU Injector</strong> pour utiliser l'ajout par SKU."
+                    );
                     return;
                 }
 
